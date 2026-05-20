@@ -170,7 +170,9 @@ export default function App() {
         <p style={{ color: "#cbb6ff", margin: "4px 0 0" }}>Tu checklist de mudanza</p>
 
         {/* Stats */}
-        <div style={{ display: "flex", justifyContent: "center", gap: 32, marginTop: 16 }}>
+        
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, width: "100%", maxWidth: 300,marginLeft: "auto", marginRight: "auto"}}>
+
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 24, fontWeight: 800 }}>{total}</div>
             <div style={{ fontSize: 11, color: "#cbb6ff", textTransform: "uppercase" }}>Total</div>
@@ -188,31 +190,37 @@ export default function App() {
         {/* Progress bar */}
         <div style={{
           marginTop: 16,
-          background: "#1a0a2e",
-          borderRadius: 10,
-          overflow: "hidden",
-          position: "relative",
-          height: 24
+          display: "flex",
+          alignItems: "center",
+          gap: 10
         }}>
           <div style={{
-            width: `${percent}%`,
-            background: "linear-gradient(90deg, #e040a0, #b388ff)",
-            height: "100%",
-            transition: "width 0.5s ease"
-          }} />
-          <span style={{
-            position: "absolute",
-            width: "100%",
-            textAlign: "center",
-            top: 0,
-            fontSize: 12,
-            fontWeight: 700,
-            lineHeight: "24px"
+            flex: 1,
+            background: "#1a0a2e",
+            borderRadius: 10,
+            overflow: "hidden",
+            height: 24
           }}>
-            {percent}% completado
+            <div style={{
+              width: `${percent}%`,
+              background: "linear-gradient(90deg, #e040a0, #b388ff)",
+              height: "100%",
+              transition: "width 0.5s ease",
+              borderRadius: 10
+            }} />
+          </div>
+          <span style={{
+            fontSize: 14,
+            fontWeight: 700,
+            color: "#cbb6ff",
+            minWidth: 50,
+            textAlign: "right"
+          }}>
+            {percent}%
           </span>
         </div>
       </div>
+
 
       {/* FILTERS */}
       <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 16 }}>
