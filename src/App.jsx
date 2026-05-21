@@ -1,6 +1,14 @@
 import { useState, useEffect } from 'react'
-
-const STORAGE_KEY = 'mudatrack'
+import { auth, googleProvider, db } from './firebase'
+import { signInWithPopup, onAuthStateChanged, signOut } from 'firebase/auth'
+import {
+  collection,
+  doc,
+  setDoc,
+  deleteDoc,
+  updateDoc,
+  onSnapshot
+} from 'firebase/firestore'
 
 const CATEGORIES = [
   "🛋️ Muebles",
@@ -41,16 +49,13 @@ const btnGradient = {
 }
 
 export default function App() {
-  const [items, setItems] = useState(() => {
-    const s = localStorage.getItem(STORAGE_KEY)
-    return s ? JSON.parse(s) : []
-  })
-
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [items, setItems] = useState([])
   const [showForm, setShowForm] = useState(false)
   const [filter, setFilter] = useState("all")
   const [editingId, setEditingId] = useState(null)
 
-  // Form fields
   const [name, setName] = useState("")
   const [link, setLink] = useState("")
   const [category, setCategory] = useState(CATEGORIES[0])
@@ -58,27 +63,61 @@ export default function App() {
   const [price, setPrice] = useState("")
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(items))
-  }, [items])
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser)
+      setLoading(false)
+    })
+    return () => unsubscribe()
+  }, [])
 
-  // Metrics
+  useEffect(() => {
+    if (!user) {
+      setItems([])
+      return
+    }
+    const itemsRef = collection(db, "users", user.uid, "items")
+    const unsubscribe = onSnapshot(itemsRef, (snapshot) => {
+      const itemsList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }))
+      setItems(itemsList)
+    })
+    return () => unsubscribe()
+  }, [user])
+
+  const handleLogin = async () => {
+    try {
+      await signInWithPopup(auth, googleProvider)
+    } catch (error) {
+      console.error("Error al iniciar sesión:", error)
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth)
+    } catch (error) {
+      console.error("Error al cerrar sesión:", error)
+    }
+  }
+
   const total = items.length
   const done = items.filter(i => i.done).length
   const pending = total - done
   const percent = total === 0 ? 0 : Math.round((done / total) * 100)
 
-  // Filtered items
   const filteredItems = items.filter(i => {
     if (filter === "pending") return !i.done
     if (filter === "done") return i.done
     return true
   })
 
-  // Group by category
   const grouped = {}
   filteredItems.forEach(i => {
-    if (!grouped[i.category]) grouped[i.category] = []
-    grouped[i.category].push(i)
+    const cat = i.category || "📦 Otros"
+    if (!grouped[cat]) grouped[cat] = []
+    grouped[cat].push(i)
   })
 
   const resetForm = () => {
@@ -90,28 +129,30 @@ export default function App() {
     setEditingId(null)
   }
 
-  const handleSubmit = () => {
-    if (!name.trim()) return
+  const handleSubmit = async () => {
+    if (!name.trim() || !user) return
 
     if (editingId) {
-      setItems(items.map(i =>
-        i.id === editingId
-          ? { ...i, name: name.trim(), link: link.trim(), category, priority, price: price ? parseFloat(price) : null }
-          : i
-      ))
+      const itemRef = doc(db, "users", user.uid, "items", editingId)
+      await updateDoc(itemRef, {
+        name: name.trim(),
+        link: link.trim(),
+        category,
+        priority,
+        price: price ? parseFloat(price) : null
+      })
     } else {
-      setItems([
-        ...items,
-        {
-          id: Date.now(),
-          name: name.trim(),
-          link: link.trim(),
-          category,
-          priority,
-          price: price ? parseFloat(price) : null,
-          done: false
-        }
-      ])
+      const newId = String(Date.now())
+      const itemRef = doc(db, "users", user.uid, "items", newId)
+      await setDoc(itemRef, {
+        name: name.trim(),
+        link: link.trim(),
+        category,
+        priority,
+        price: price ? parseFloat(price) : null,
+        done: false,
+        createdAt: Date.now()
+      })
     }
 
     resetForm()
@@ -128,14 +169,21 @@ export default function App() {
     setShowForm(true)
   }
 
-  const deleteItem = (id) => {
-    setItems(items.filter(i => i.id !== id))
+  const deleteItem = async (id) => {
+    if (!user) return
+    const itemRef = doc(db, "users", user.uid, "items", id)
+    await deleteDoc(itemRef)
+  }
+
+  const toggleDone = async (item) => {
+    if (!user) return
+    const itemRef = doc(db, "users", user.uid, "items", item.id)
+    await updateDoc(itemRef, { done: !item.done })
   }
 
   const priorityColors = { alta: "#ef5350", media: "#ffa726", baja: "#66bb6a" }
-  const priorityLabels = { alta: "🔴 Alta", media: "🟡 Media", baja: "🟢 Baja" }
 
-  const filterBtn = (key, label) => ({
+  const filterBtn = (key) => ({
     background: filter === key ? "linear-gradient(135deg, #e040a0, #b388ff)" : "#2d1b4e",
     color: filter === key ? "white" : "#cbb6ff",
     border: filter === key ? "none" : "1px solid #3b2667",
@@ -146,6 +194,78 @@ export default function App() {
     fontWeight: 600,
     fontSize: 13
   })
+
+  if (loading) {
+    return (
+      <div style={{
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        height: "100vh",
+        color: "#cbb6ff",
+        fontSize: 18
+      }}>
+        Cargando...
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: "100vh",
+        padding: 20,
+        textAlign: "center"
+      }}>
+        <h1 style={{
+          fontSize: 48,
+          margin: 0,
+          background: "linear-gradient(135deg, #e040a0, #b388ff)",
+          WebkitBackgroundClip: "text",
+          WebkitTextFillColor: "transparent"
+        }}>
+          MudaTrack
+        </h1>
+        <p style={{ color: "#cbb6ff", fontSize: 18, margin: "8px 0 32px" }}>
+          Tu checklist de mudanza
+        </p>
+
+        <button
+          onClick={handleLogin}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "14px 32px",
+            borderRadius: 12,
+            border: "1px solid rgba(224, 64, 160, 0.3)",
+            background: "#2d1b4e",
+            color: "white",
+            fontSize: 16,
+            fontWeight: 600,
+            cursor: "pointer",
+            fontFamily: "inherit"
+          }}
+        >
+          <svg width="20" height="20" viewBox="0 0 48 48">
+            <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z"/>
+            <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z"/>
+            <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z"/>
+            <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/>
+          </svg>
+          Iniciar con Google
+        </button>
+
+        <p style={{ color: "#7c6a8a", fontSize: 13, marginTop: 24, maxWidth: 300 }}>
+          Iniciá sesión para guardar tu lista en la nube y acceder desde cualquier dispositivo 📱💻
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div style={{ padding: "20px 16px", maxWidth: 700, margin: "0 auto" }}>
@@ -158,6 +278,40 @@ export default function App() {
         borderRadius: 16,
         border: "1px solid rgba(224, 64, 160, 0.3)"
       }}>
+        <div style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 12
+        }}>
+          {user.photoURL && (
+            <img
+              src={user.photoURL}
+              alt="avatar"
+              style={{ width: 28, height: 28, borderRadius: "50%" }}
+            />
+          )}
+          <span style={{ fontSize: 13, color: "#cbb6ff" }}>
+            {user.displayName}
+          </span>
+          <button
+            onClick={handleLogout}
+            style={{
+              background: "transparent",
+              border: "1px solid #3b2667",
+              color: "#cbb6ff",
+              padding: "4px 10px",
+              borderRadius: 6,
+              fontSize: 11,
+              cursor: "pointer",
+              fontFamily: "inherit"
+            }}
+          >
+            Salir
+          </button>
+        </div>
+
         <h1 style={{
           margin: 0,
           fontSize: 32,
@@ -165,14 +319,12 @@ export default function App() {
           WebkitBackgroundClip: "text",
           WebkitTextFillColor: "transparent"
         }}>
-          📦 MudaTrack
+          MudaTrack
         </h1>
         <p style={{ color: "#cbb6ff", margin: "4px 0 0" }}>Tu checklist de mudanza</p>
 
         {/* Stats */}
-        
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, width: "100%", maxWidth: 300,marginLeft: "auto", marginRight: "auto"}}>
-
+        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, width: "100%", maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
           <div style={{ textAlign: "center" }}>
             <div style={{ fontSize: 24, fontWeight: 800 }}>{total}</div>
             <div style={{ fontSize: 11, color: "#cbb6ff", textTransform: "uppercase" }}>Total</div>
@@ -220,7 +372,6 @@ export default function App() {
           </span>
         </div>
       </div>
-
 
       {/* FILTERS */}
       <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 16 }}>
@@ -341,16 +492,11 @@ export default function App() {
                     transition: "all 0.2s"
                   }}
                 >
-                  {/* Left side */}
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
                     <input
                       type="checkbox"
                       checked={i.done}
-                      onChange={() =>
-                        setItems(items.map(x =>
-                          x.id === i.id ? { ...x, done: !x.done } : x
-                        ))
-                      }
+                      onChange={() => toggleDone(i)}
                       style={{ width: 18, height: 18, cursor: "pointer", accentColor: "#e040a0" }}
                     />
 
@@ -391,7 +537,6 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Right side - actions */}
                   <div style={{ display: "flex", gap: 6 }}>
                     <button
                       onClick={() => startEdit(i)}
