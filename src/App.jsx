@@ -1,731 +1,293 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { auth, googleProvider, db } from './firebase'
 import { signInWithPopup, onAuthStateChanged, signOut } from 'firebase/auth'
-import {
-  collection,
-  doc,
-  setDoc,
-  getDoc,
-  deleteDoc,
-  updateDoc,
-  onSnapshot
-} from 'firebase/firestore'
+import { collection, doc, setDoc, getDoc, deleteDoc, updateDoc, onSnapshot } from 'firebase/firestore'
 
-const CATEGORIES = [
-  "🛋️ Muebles",
-  "🍳 Cocina",
-  "🛁 Baño",
-  "🛏️ Dormitorio",
-  "💡 Electro / Iluminación",
-  "🧹 Limpieza",
-  "🔧 Herramientas",
-  "📦 Otros"
-]
+const CATEGORIES = ['🛋️ Muebles','🍳 Cocina','🛁 Baño','🛏️ Dormitorio','💡 Electro / Iluminación','🧹 Limpieza','🔧 Herramientas','📦 Otros']
+const PRIORITY_COLORS = { alta:'#ef5350', media:'#ffb020', baja:'#66bb6a' }
 
-const inputStyle = {
-  display: "block",
-  width: "100%",
-  padding: "10px 12px",
-  marginBottom: 10,
-  background: "#1a0a2e",
-  color: "#f3e5f5",
-  border: "1px solid #3b2667",
-  borderRadius: 8,
-  fontSize: 14,
-  fontFamily: "inherit",
-  outline: "none",
-  boxSizing: "border-box"
+const clampInt = (v,min,max) => {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return min
+  return Math.max(min, Math.min(max, Math.trunc(n)))
 }
 
-const btnGradient = {
-  background: "linear-gradient(135deg, #e040a0, #b388ff)",
-  border: "none",
-  padding: "10px 20px",
-  borderRadius: 10,
-  color: "white",
-  fontWeight: "bold",
-  cursor: "pointer",
-  fontFamily: "inherit",
-  fontSize: 14
+const parseMoneyToCents = (raw) => {
+  if (raw == null) return null
+  let s = String(raw).trim()
+  if (!s) return null
+  s = s.replace(/[^0-9,.-]/g,'')
+  const c = s.lastIndexOf(',')
+  const d = s.lastIndexOf('.')
+  const pos = Math.max(c,d)
+  let intPart = s
+  let decPart = ''
+  if (pos !== -1) {
+    intPart = s.slice(0,pos)
+    decPart = s.slice(pos+1)
+  }
+  const negative = intPart.startsWith('-')
+  intPart = intPart.replace(/-/g,'').replace(/[.,]/g,'')
+  const whole = intPart ? Number(intPart) : 0
+  if (!Number.isFinite(whole)) return null
+  decPart = (decPart || '').replace(/[^0-9]/g,'')
+  decPart = (decPart + '00').slice(0,2)
+  const cents = whole * 100 + Number(decPart)
+  return negative ? -cents : cents
 }
 
-const btnOutline = {
-  background: "transparent",
-  border: "1px solid #3b2667",
-  padding: "8px 16px",
-  borderRadius: 8,
-  color: "#cbb6ff",
-  cursor: "pointer",
-  fontFamily: "inherit",
-  fontSize: 13
+const formatARS = (cents) => {
+  const n = Number(cents)
+  const value = Number.isFinite(n) ? n / 100 : 0
+  return value.toLocaleString('es-AR', { style:'currency', currency:'ARS' })
 }
 
-export default function App() {
-  const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState("personal")
+const getPriceCents = (item) => {
+  if (item?.priceCents != null) return Math.round(Number(item.priceCents) || 0)
+  if (item?.price != null) return Math.round((Number(item.price) || 0) * 100)
+  return 0
+}
 
-  const [personalListId, setPersonalListId] = useState(null)
-  const [sharedListId, setSharedListId] = useState(null)
+const getInstallments = (item) => {
+  const inst = item?.installments
+  if (!inst || !inst.enabled) return null
+  const totalCents = inst.totalCents != null ? Number(inst.totalCents) : Math.round((Number(inst.total) || 0) * 100)
+  const count = clampInt(inst.count ?? inst.cuotas ?? 1, 1, 120)
+  const paid = clampInt(inst.paidCount ?? inst.pagadas ?? 0, 0, count)
+  return { totalCents: Math.round(Number.isFinite(totalCents) ? totalCents : 0), count, paid }
+}
 
-  const [personalItems, setPersonalItems] = useState([])
-  const [sharedItems, setSharedItems] = useState([])
-  const [sharedMembers, setSharedMembers] = useState([])
+const getCommitmentCents = (item) => {
+  const inst = getInstallments(item)
+  if (inst) return inst.totalCents
+  return getPriceCents(item)
+}
 
-  const [showForm, setShowForm] = useState(false)
-  const [filter, setFilter] = useState("all")
-  const [editingId, setEditingId] = useState(null)
-  const [showSharePanel, setShowSharePanel] = useState(false)
-  const [joinCode, setJoinCode] = useState("")
-  const [showJoinPanel, setShowJoinPanel] = useState(false)
-  const [copied, setCopied] = useState(false)
+const initials = (name) => (name || 'MT').split(' ').filter(Boolean).slice(0,2).map(x => x[0]?.toUpperCase()).join('') || 'MT'
 
-  const [name, setName] = useState("")
-  const [link, setLink] = useState("")
-  const [category, setCategory] = useState(CATEGORIES[0])
-  const [priority, setPriority] = useState("media")
-  const [price, setPrice] = useState("")
+function Avatar({ user, size=34 }) {
+  const [failed, setFailed] = useState(false)
+  if (user?.photoURL && !failed) return <img className="avatar" src={user.photoURL} alt="avatar" style={{width:size,height:size}} onError={() => setFailed(true)} />
+  return <div className="avatar avatarFallback" style={{width:size,height:size}}>{initials(user?.displayName)}</div>
+}
 
-  const currentListId = activeTab === "personal" ? personalListId : sharedListId
-  const items = activeTab === "personal" ? personalItems : sharedItems
+function GoogleIcon(){return <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4C12.955 4 4 12.955 4 24s8.955 20 20 20s20-8.955 20-20c0-1.341-.138-2.65-.389-3.917z"/><path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4C16.318 4 9.656 8.337 6.306 14.691z"/><path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.192l-6.19-5.238C29.211 35.091 26.715 36 24 36c-5.202 0-9.619-3.317-11.283-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44z"/><path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.087 5.571l6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917z"/></svg>}
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser)
-      setLoading(false)
-    })
-    return () => unsubscribe()
-  }, [])
+export default function App(){
+  const [user,setUser]=useState(null)
+  const [loading,setLoading]=useState(true)
+  const [activeListType,setActiveListType]=useState('personal')
+  const [viewMode,setViewMode]=useState('items')
+  const [personalListId,setPersonalListId]=useState(null)
+  const [sharedListId,setSharedListId]=useState(null)
+  const [personalItems,setPersonalItems]=useState([])
+  const [sharedItems,setSharedItems]=useState([])
+  const [sharedMembers,setSharedMembers]=useState([])
+  const [showForm,setShowForm]=useState(false)
+  const [filter,setFilter]=useState('all')
+  const [searchTerm,setSearchTerm]=useState('')
+  const [editingId,setEditingId]=useState(null)
+  const [showSharePanel,setShowSharePanel]=useState(false)
+  const [showJoinPanel,setShowJoinPanel]=useState(false)
+  const [joinCode,setJoinCode]=useState('')
+  const [copied,setCopied]=useState(false)
+  const [name,setName]=useState('')
+  const [link,setLink]=useState('')
+  const [category,setCategory]=useState(CATEGORIES[0])
+  const [priority,setPriority]=useState('media')
+  const [price,setPrice]=useState('')
+  const [notes,setNotes]=useState('')
+  const [installmentsEnabled,setInstallmentsEnabled]=useState(false)
+  const [installmentsCount,setInstallmentsCount]=useState('12')
+  const [installmentsPaid,setInstallmentsPaid]=useState('0')
+  const [installmentsTotal,setInstallmentsTotal]=useState('')
 
-  useEffect(() => {
-    if (!user) {
-      setPersonalListId(null)
-      setSharedListId(null)
-      setPersonalItems([])
-      setSharedItems([])
-      setSharedMembers([])
-      return
-    }
+  const currentListId = activeListType === 'personal' ? personalListId : sharedListId
+  const items = activeListType === 'personal' ? personalItems : sharedItems
 
-    const initLists = async () => {
-      const userRef = doc(db, "users", user.uid)
-      const userSnap = await getDoc(userRef)
-
-      if (userSnap.exists()) {
-        const data = userSnap.data()
-        if (data.personalListId) {
-          setPersonalListId(data.personalListId)
-        } else {
-          const newId = await createList("Mi lista")
-          await updateDoc(userRef, { personalListId: newId })
-          setPersonalListId(newId)
-        }
-        setSharedListId(data.sharedListId || null)
-      } else {
-        const newId = await createList("Mi lista")
-        await setDoc(userRef, { personalListId: newId, sharedListId: null })
-        setPersonalListId(newId)
-      }
-    }
-
-    initLists()
-  }, [user])
+  useEffect(() => onAuthStateChanged(auth, u => { setUser(u); setLoading(false) }), [])
 
   const createList = async (listName) => {
-    const newId = user.uid.slice(0, 8) + "-" + Date.now().toString(36)
-    const listRef = doc(db, "lists", newId)
-    await setDoc(listRef, {
-      name: listName,
-      createdBy: user.uid,
-      createdAt: Date.now()
-    })
-    const memberRef = doc(db, "lists", newId, "members", user.uid)
-    await setDoc(memberRef, {
-      name: user.displayName,
-      photo: user.photoURL,
-      joinedAt: Date.now()
-    })
-    return newId
+    const id = user.uid.slice(0,8) + '-' + Date.now().toString(36)
+    await setDoc(doc(db,'lists',id), { name:listName, createdBy:user.uid, createdAt:Date.now() })
+    await setDoc(doc(db,'lists',id,'members',user.uid), { name:user.displayName, photo:user.photoURL, joinedAt:Date.now() })
+    return id
   }
+
+  useEffect(() => {
+    if (!user) { setPersonalListId(null); setSharedListId(null); setPersonalItems([]); setSharedItems([]); setSharedMembers([]); return }
+    const init = async () => {
+      const userRef = doc(db,'users',user.uid)
+      const snap = await getDoc(userRef)
+      if (snap.exists()) {
+        const data = snap.data()
+        if (data.personalListId) setPersonalListId(data.personalListId)
+        else { const id = await createList('Mi lista'); await updateDoc(userRef,{personalListId:id}); setPersonalListId(id) }
+        setSharedListId(data.sharedListId || null)
+      } else {
+        const id = await createList('Mi lista')
+        await setDoc(userRef,{personalListId:id,sharedListId:null})
+        setPersonalListId(id)
+      }
+    }
+    init()
+  }, [user])
 
   useEffect(() => {
     if (!personalListId) return
-    const ref = collection(db, "lists", personalListId, "items")
-    const unsub = onSnapshot(ref, (snap) => {
-      setPersonalItems(snap.docs.map(d => ({ id: d.id, ...d.data() })))
-    })
-    return () => unsub()
+    return onSnapshot(collection(db,'lists',personalListId,'items'), snap => setPersonalItems(snap.docs.map(d => ({id:d.id,...d.data()}))))
   }, [personalListId])
 
   useEffect(() => {
-    if (!sharedListId) {
-      setSharedItems([])
-      setSharedMembers([])
-      return
-    }
-    const itemsRef = collection(db, "lists", sharedListId, "items")
-    const unsubItems = onSnapshot(itemsRef, (snap) => {
-      setSharedItems(snap.docs.map(d => ({ id: d.id, ...d.data() })))
-    })
-    const membersRef = collection(db, "lists", sharedListId, "members")
-    const unsubMembers = onSnapshot(membersRef, (snap) => {
-      setSharedMembers(snap.docs.map(d => ({ id: d.id, ...d.data() })))
-    })
-    return () => { unsubItems(); unsubMembers() }
+    if (!sharedListId) { setSharedItems([]); setSharedMembers([]); return }
+    const u1 = onSnapshot(collection(db,'lists',sharedListId,'items'), snap => setSharedItems(snap.docs.map(d => ({id:d.id,...d.data()}))))
+    const u2 = onSnapshot(collection(db,'lists',sharedListId,'members'), snap => setSharedMembers(snap.docs.map(d => ({id:d.id,...d.data()}))))
+    return () => { u1(); u2() }
   }, [sharedListId])
 
-  const handleLogin = async () => {
-    try {
-      await signInWithPopup(auth, googleProvider)
-    } catch (error) {
-      console.error("Error al iniciar sesión:", error)
-    }
+  const resetForm = () => {
+    setName(''); setLink(''); setCategory(CATEGORIES[0]); setPriority('media'); setPrice(''); setNotes('')
+    setInstallmentsEnabled(false); setInstallmentsCount('12'); setInstallmentsPaid('0'); setInstallmentsTotal(''); setEditingId(null)
   }
 
-  const handleLogout = async () => {
-    try {
-      await signOut(auth)
-    } catch (error) {
-      console.error("Error al cerrar sesión:", error)
-    }
+  const switchList = (type) => {
+    setActiveListType(type); setViewMode('items'); setShowForm(false); setShowJoinPanel(false); setShowSharePanel(false); setSearchTerm(''); setFilter('all'); resetForm()
   }
+
+  const handleLogin = async () => { try { await signInWithPopup(auth, googleProvider) } catch(e) { console.error(e) } }
+  const handleLogout = async () => { try { await signOut(auth) } catch(e) { console.error(e) } }
 
   const handleCreateShared = async () => {
-    if (!user) return
-    const newId = await createList("Lista compartida")
-    const userRef = doc(db, "users", user.uid)
-    await updateDoc(userRef, { sharedListId: newId })
-    setSharedListId(newId)
-    setActiveTab("shared")
+    const id = await createList('Lista compartida')
+    await updateDoc(doc(db,'users',user.uid), { sharedListId:id })
+    setSharedListId(id); setActiveListType('shared'); setViewMode('items'); setShowJoinPanel(false); setShowSharePanel(false)
   }
 
   const handleJoinList = async () => {
-    if (!joinCode.trim() || !user) return
-    const code = joinCode.trim()
-    const listRef = doc(db, "lists", code)
-    const listSnap = await getDoc(listRef)
-
-    if (!listSnap.exists()) {
-      alert("Código no encontrado. Verificá que esté bien escrito.")
-      return
-    }
-
-    const memberRef = doc(db, "lists", code, "members", user.uid)
-    await setDoc(memberRef, {
-      name: user.displayName,
-      photo: user.photoURL,
-      joinedAt: Date.now()
-    })
-
-    const userRef = doc(db, "users", user.uid)
-    await updateDoc(userRef, { sharedListId: code })
-    setSharedListId(code)
-    setJoinCode("")
-    setShowJoinPanel(false)
-    setActiveTab("shared")
+    const code = joinCode.trim(); if (!code) return
+    const listRef = doc(db,'lists',code)
+    const snap = await getDoc(listRef)
+    if (!snap.exists()) { alert('Código no encontrado. Verificá que esté bien escrito.'); return }
+    await setDoc(doc(db,'lists',code,'members',user.uid), { name:user.displayName, photo:user.photoURL, joinedAt:Date.now() }, { merge:true })
+    await updateDoc(doc(db,'users',user.uid), { sharedListId:code })
+    setSharedListId(code); setJoinCode(''); setShowJoinPanel(false); setActiveListType('shared'); setViewMode('items')
   }
 
   const handleLeaveShared = async () => {
-    if (!user || !sharedListId) return
-    if (!confirm("¿Salir de la lista compartida?")) return
-
-    const memberRef = doc(db, "lists", sharedListId, "members", user.uid)
-    await deleteDoc(memberRef)
-
-    const userRef = doc(db, "users", user.uid)
-    await updateDoc(userRef, { sharedListId: null })
-    setSharedListId(null)
-    setActiveTab("personal")
+    if (!sharedListId || !confirm('¿Salir de la lista compartida?')) return
+    await deleteDoc(doc(db,'lists',sharedListId,'members',user.uid))
+    await updateDoc(doc(db,'users',user.uid), { sharedListId:null })
+    setSharedListId(null); setActiveListType('personal'); setViewMode('items'); setShowSharePanel(false)
   }
 
-  const copyCode = () => {
-    navigator.clipboard.writeText(sharedListId)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
+  const copyCode = () => { if (!sharedListId) return; navigator.clipboard.writeText(sharedListId); setCopied(true); setTimeout(() => setCopied(false),2000) }
 
-  const total = items.length
-  const done = items.filter(i => i.done).length
-  const pending = total - done
-  const percent = total === 0 ? 0 : Math.round((done / total) * 100)
+  const totalItems = items.length
+  const doneItems = items.filter(i => i.done).length
+  const pendingItems = totalItems - doneItems
+  const completion = totalItems === 0 ? 0 : Math.round((doneItems / totalItems) * 100)
 
-  const filteredItems = items.filter(i => {
-    if (filter === "pending") return !i.done
-    if (filter === "done") return i.done
-    return true
-  })
+  const budgetTotalCents = items.reduce((s,i) => s + getCommitmentCents(i), 0)
+  const budgetDoneCents = items.reduce((s,i) => s + (i.done ? getCommitmentCents(i) : 0), 0)
+  const budgetPendingCents = budgetTotalCents - budgetDoneCents
 
-  const grouped = {}
-  filteredItems.forEach(i => {
-    const cat = i.category || "📦 Otros"
-    if (!grouped[cat]) grouped[cat] = []
-    grouped[cat].push(i)
-  })
+  const installmentItems = useMemo(() => items.filter(i => !!getInstallments(i)), [items])
+  const installmentsTotalCents = installmentItems.reduce((s,i) => s + getInstallments(i).totalCents, 0)
+  const installmentsPaidCents = installmentItems.reduce((s,i) => { const inst=getInstallments(i); const per=inst.count?Math.round(inst.totalCents/inst.count):0; return s + per * inst.paid }, 0)
+  const installmentsRemainingCents = installmentsTotalCents - installmentsPaidCents
 
-  const resetForm = () => {
-    setName("")
-    setLink("")
-    setCategory(CATEGORIES[0])
-    setPriority("media")
-    setPrice("")
-    setEditingId(null)
-  }
+  const filteredItems = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase()
+    return items
+      .filter(i => filter === 'pending' ? !i.done : filter === 'done' ? i.done : true)
+      .filter(i => !q || `${i.name || ''} ${i.notes || ''}`.toLowerCase().includes(q))
+  }, [items, filter, searchTerm])
+
+  const groupedItems = useMemo(() => {
+    const groups = {}
+    filteredItems.forEach(i => { const cat=i.category || '📦 Otros'; if(!groups[cat]) groups[cat]=[]; groups[cat].push(i) })
+    return groups
+  }, [filteredItems])
 
   const handleSubmit = async () => {
-    if (!name.trim() || !user || !currentListId) return
-
-    if (editingId) {
-      const itemRef = doc(db, "lists", currentListId, "items", editingId)
-      await updateDoc(itemRef, {
-        name: name.trim(),
-        link: link.trim(),
-        category,
-        priority,
-        price: price ? parseFloat(price) : null
-      })
-    } else {
-      const newId = String(Date.now())
-      const itemRef = doc(db, "lists", currentListId, "items", newId)
-      await setDoc(itemRef, {
-        name: name.trim(),
-        link: link.trim(),
-        category,
-        priority,
-        price: price ? parseFloat(price) : null,
-        done: false,
-        createdAt: Date.now(),
-        addedBy: user.displayName
-      })
+    if (!name.trim() || !currentListId) return
+    const priceCents = parseMoneyToCents(price)
+    const enabled = !!installmentsEnabled
+    const count = clampInt(installmentsCount,1,120)
+    const paidCount = clampInt(installmentsPaid,0,count)
+    const totalCents = enabled ? (parseMoneyToCents(installmentsTotal) ?? priceCents ?? 0) : 0
+    const payload = {
+      name:name.trim(), link:link.trim(), category, priority,
+      priceCents: priceCents ?? null,
+      notes: notes.trim(),
+      installments: enabled ? { enabled:true, totalCents, count, paidCount } : { enabled:false }
     }
-
-    resetForm()
-    setShowForm(false)
+    if (editingId) await updateDoc(doc(db,'lists',currentListId,'items',editingId), payload)
+    else await setDoc(doc(db,'lists',currentListId,'items',String(Date.now())), { ...payload, done:false, createdAt:Date.now(), addedBy:user?.displayName || 'user' })
+    resetForm(); setShowForm(false)
   }
 
   const startEdit = (item) => {
-    setName(item.name)
-    setLink(item.link || "")
-    setCategory(item.category || CATEGORIES[0])
-    setPriority(item.priority || "media")
-    setPrice(item.price ? String(item.price) : "")
-    setEditingId(item.id)
-    setShowForm(true)
+    setName(item.name || ''); setLink(item.link || ''); setCategory(item.category || CATEGORIES[0]); setPriority(item.priority || 'media')
+    const cents = item.priceCents != null ? Number(item.priceCents) : item.price != null ? Math.round(Number(item.price)*100) : null
+    setPrice(cents != null ? String((cents/100).toFixed(2)).replace(/\.00$/,'') : '')
+    setNotes(item.notes || '')
+    const inst = getInstallments(item)
+    if (inst) { setInstallmentsEnabled(true); setInstallmentsCount(String(inst.count)); setInstallmentsPaid(String(inst.paid)); setInstallmentsTotal(String((inst.totalCents/100).toFixed(2)).replace(/\.00$/,'')) }
+    else { setInstallmentsEnabled(false); setInstallmentsCount('12'); setInstallmentsPaid('0'); setInstallmentsTotal('') }
+    setEditingId(item.id); setShowForm(true); setViewMode('items')
   }
 
-  const deleteItem = async (id) => {
-    if (!user || !currentListId) return
-    const itemRef = doc(db, "lists", currentListId, "items", id)
-    await deleteDoc(itemRef)
+  const deleteItem = async (id) => { if (!currentListId) return; await deleteDoc(doc(db,'lists',currentListId,'items',id)) }
+  const toggleDone = async (item) => { if (!currentListId) return; await updateDoc(doc(db,'lists',currentListId,'items',item.id), { done: !item.done }) }
+  const updateInstallmentPaidCount = async (item, delta) => {
+    const inst = getInstallments(item); if (!inst || !currentListId) return
+    await updateDoc(doc(db,'lists',currentListId,'items',item.id), { installments:{ enabled:true, totalCents:inst.totalCents, count:inst.count, paidCount:clampInt(inst.paid+delta,0,inst.count) } })
   }
 
-  const toggleDone = async (item) => {
-    if (!user || !currentListId) return
-    const itemRef = doc(db, "lists", currentListId, "items", item.id)
-    await updateDoc(itemRef, { done: !item.done })
-  }
+  if (loading) return <div className="screenCenter">Cargando…</div>
 
-  const priorityColors = { alta: "#ef5350", media: "#ffa726", baja: "#66bb6a" }
-
-  const filterBtn = (key) => ({
-    background: filter === key ? "linear-gradient(135deg, #e040a0, #b388ff)" : "#2d1b4e",
-    color: filter === key ? "white" : "#cbb6ff",
-    border: filter === key ? "none" : "1px solid #3b2667",
-    padding: "8px 18px",
-    borderRadius: 20,
-    cursor: "pointer",
-    fontFamily: "inherit",
-    fontWeight: 600,
-    fontSize: 13
-  })
-
-  const tabStyle = (tab) => ({
-    flex: 1,
-    padding: "10px",
-    border: "none",
-    borderRadius: 10,
-    cursor: "pointer",
-    fontFamily: "inherit",
-    fontWeight: 700,
-    fontSize: 14,
-    background: activeTab === tab ? "linear-gradient(135deg, #e040a0, #b388ff)" : "transparent",
-    color: activeTab === tab ? "white" : "#cbb6ff",
-    transition: "all 0.2s"
-  })
-
-  if (loading) {
-    return (
-      <div style={{
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center",
-        height: "100vh",
-        color: "#cbb6ff",
-        fontSize: 18
-      }}>
-        Cargando...
-      </div>
-    )
-  }
-
-  if (!user) {
-    return (
-      <div style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        height: "100vh",
-        padding: 20,
-        textAlign: "center"
-      }}>
-        <h1 style={{
-          fontSize: 48,
-          margin: 0,
-          background: "linear-gradient(135deg, #e040a0, #b388ff)",
-          WebkitBackgroundClip: "text",
-          WebkitTextFillColor: "transparent"
-        }}>
-          MudaTrack
-        </h1>
-        <p style={{ color: "#cbb6ff", fontSize: 18, margin: "8px 0 32px" }}>
-          Tu checklist de mudanza
-        </p>
-        <button
-          onClick={handleLogin}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "14px 32px",
-            borderRadius: 12,
-            border: "1px solid rgba(224, 64, 160, 0.3)",
-            background: "#2d1b4e",
-            color: "white",
-            fontSize: 16,
-            fontWeight: 600,
-            cursor: "pointer",
-            fontFamily: "inherit"
-          }}
-        >
-          <svg width="20" height="20" viewBox="0 0 48 48">
-            <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z"/>
-            <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z"/>
-            <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z"/>
-            <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/>
-          </svg>
-          Iniciar con Google
-        </button>
-        <p style={{ color: "#7c6a8a", fontSize: 13, marginTop: 24, maxWidth: 300 }}>
-          Iniciá sesión para guardar tu lista en la nube y acceder desde cualquier dispositivo 📱💻
-        </p>
-      </div>
-    )
-  }
+  if (!user) return (
+    <div className="loginShell">
+      <section className="loginCard">
+        <div className="loginIcon">📦</div>
+        <h1>MudaTrack</h1>
+        <p>Tu checklist de mudanza, clara y sincronizada.</p>
+        <button className="googleButton" onClick={handleLogin}><span className="googleIconWrap"><GoogleIcon /></span>Iniciar con Google</button>
+        <div className="loginHighlights"><div><strong>Cloud sync</strong><span>PC + móvil</span></div><div><strong>Listas</strong><span>personal + compartida</span></div></div>
+      </section>
+    </div>
+  )
 
   return (
-    <div style={{ padding: "20px 16px", maxWidth: 700, margin: "0 auto" }}>
+    <div className="appShell">
+      <main className="appLayout">
+        <aside className="sidePanel">
+          <header className="userBar"><div className="userIdentity"><Avatar user={user}/><span>{user.displayName}</span></div><button className="outlineButton" onClick={handleLogout}>Salir</button></header>
+          <section className="brandBlock"><h1>MudaTrack</h1><p>Tu checklist de mudanza</p></section>
+          <div className="segmentedControl"><button className={activeListType==='personal'?'active':''} onClick={()=>switchList('personal')}>📋 Mi lista</button><button className={activeListType==='shared'?'active':''} onClick={()=>switchList('shared')}>👥 Compartida</button></div>
 
-      {/* HEADER */}
-      <div style={{
-        textAlign: "center",
-        padding: 24,
-        background: "#2d1b4e",
-        borderRadius: 16,
-        border: "1px solid rgba(224, 64, 160, 0.3)"
-      }}>
-        <div style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 12
-        }}>
-          {user.photoURL && (
-            <img src={user.photoURL} alt="avatar" style={{ width: 28, height: 28, borderRadius: "50%" }} />
-          )}
-          <span style={{ fontSize: 13, color: "#cbb6ff" }}>{user.displayName}</span>
-          <button onClick={handleLogout} style={btnOutline}>Salir</button>
-        </div>
+          {activeListType==='shared' && !sharedListId && <section className="panelNotice"><strong>Aún no tenés una lista compartida</strong><p>Creá una nueva o sumate con un código.</p><div className="buttonRow"><button className="primaryButton small" onClick={handleCreateShared}>➕ Crear</button><button className="outlineButton" onClick={()=>setShowJoinPanel(!showJoinPanel)}>🤝 Unirme</button></div>{showJoinPanel && <div className="joinRow"><input className="input" placeholder="Código de lista" value={joinCode} onChange={e=>setJoinCode(e.target.value)}/><button className="primaryButton small" onClick={handleJoinList}>OK</button></div>}</section>}
 
-        <h1 style={{
-          margin: 0,
-          fontSize: 32,
-          background: "linear-gradient(135deg, #e040a0, #b388ff)",
-          WebkitBackgroundClip: "text",
-          WebkitTextFillColor: "transparent"
-        }}>
-          MudaTrack
-        </h1>
-        <p style={{ color: "#cbb6ff", margin: "4px 0 0" }}>Tu checklist de mudanza</p>
+          {activeListType==='shared' && sharedListId && <section className="sharedPanel"><div className="memberRow">{sharedMembers.map(m=><Avatar key={m.id} user={{displayName:m.name,photoURL:m.photo}} size={30}/>)}<span>{sharedMembers.length} {sharedMembers.length===1?'persona':'personas'}</span></div><div className="buttonRow"><button className="outlineButton" onClick={()=>setShowSharePanel(!showSharePanel)}>🔗 Código</button><button className="dangerButton" onClick={handleLeaveShared}>Salir</button></div>{showSharePanel && <div className="shareCodeBox"><span>Código para compartir</span><code>{sharedListId}</code><button className="outlineButton compact" onClick={copyCode}>{copied?'Copiado ✅':'Copiar'}</button></div>}</section>}
 
-        {/* TABS */}
-        <div style={{
-          display: "flex",
-          gap: 8,
-          marginTop: 16,
-          background: "#1a0a2e",
-          borderRadius: 12,
-          padding: 4
-        }}>
-          <button onClick={() => { setActiveTab("personal"); setShowForm(false); resetForm() }} style={tabStyle("personal")}>
-            📋 Mi lista
-          </button>
-          <button onClick={() => { setActiveTab("shared"); setShowForm(false); resetForm() }} style={tabStyle("shared")}>
-            👥 Compartida
-          </button>
-        </div>
+          <section className="kpiGrid"><div><strong>{totalItems}</strong><span>Total</span></div><div><strong className="ok">{doneItems}</strong><span>Listo</span></div><div><strong className="warn">{pendingItems}</strong><span>Pendiente</span></div></section>
+          <section className="budgetHero"><div className="budgetTitle">💰 Presupuesto total a pagar</div><div className="budgetAmount">{formatARS(budgetTotalCents)}</div><div className="budgetSplit"><span>Pendiente <strong>{formatARS(budgetPendingCents)}</strong></span><span>Listo <strong>{formatARS(budgetDoneCents)}</strong></span>{installmentsTotalCents>0 && <span>Incluye cuotas <strong>{formatARS(installmentsTotalCents)}</strong></span>}</div></section>
+          <section className="progressBlock"><div className="progressTrack"><div className="progressFill" style={{width:`${completion}%`}} /></div><strong>{completion}%</strong></section>
+          <div className="segmentedControl secondary"><button className={viewMode==='items'?'active':''} onClick={()=>setViewMode('items')}>🧾 Items</button><button className={viewMode==='cuotas'?'active':''} onClick={()=>setViewMode('cuotas')}>💳 Cuotas</button></div>
+          {viewMode==='cuotas' && <section className="installmentSummary"><strong>Resumen de cuotas</strong><span>Total financiado: <b>{formatARS(installmentsTotalCents)}</b></span><span>Pagado: <b>{formatARS(installmentsPaidCents)}</b></span><span>Pendiente: <b>{formatARS(installmentsRemainingCents)}</b></span></section>}
+        </aside>
 
-        {/* Shared: no list yet */}
-        {activeTab === "shared" && !sharedListId && (
-          <div style={{ marginTop: 16, padding: 16, background: "#1a0a2e", borderRadius: 10 }}>
-            <p style={{ color: "#cbb6ff", margin: "0 0 12px", fontSize: 14 }}>Aún no tenés una lista compartida</p>
-            <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-              <button onClick={handleCreateShared} style={btnGradient}>
-                ➕ Crear lista compartida
-              </button>
-              <button onClick={() => setShowJoinPanel(!showJoinPanel)} style={btnOutline}>
-                🤝 Unirme con código
-              </button>
-            </div>
-            {showJoinPanel && (
-              <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-                <input
-                  placeholder="Código de lista"
-                  value={joinCode}
-                  onChange={e => setJoinCode(e.target.value)}
-                  style={{ ...inputStyle, marginBottom: 0, flex: 1 }}
-                />
-                <button onClick={handleJoinList} style={{ ...btnGradient, padding: "10px 16px" }}>
-                  Unirme
-                </button>
-              </div>
-            )}
-          </div>
-        )}
+        <section className="contentPanel">
+          {viewMode==='items' && <>
+            <div className="toolbar"><div className="filters"><button className={filter==='all'?'active':''} onClick={()=>setFilter('all')}>🏠 Todos</button><button className={filter==='pending'?'active':''} onClick={()=>setFilter('pending')}>⏳ Pendientes</button><button className={filter==='done'?'active':''} onClick={()=>setFilter('done')}>✅ Listos</button></div><div className="searchBox"><input placeholder="🔍 Buscar por nombre o notas" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}/>{searchTerm.trim() && <button onClick={()=>setSearchTerm('')}>✕</button>}</div><button className="primaryButton addButton" onClick={()=>{ if(showForm&&editingId) resetForm(); setShowForm(!showForm) }}>{showForm?'✕ Cerrar':'＋ Agregar artículo'}</button></div>
+            {showForm && <section className="itemForm"><input className="input" placeholder="Nombre del artículo *" value={name} onChange={e=>setName(e.target.value)}/><select className="input" value={category} onChange={e=>setCategory(e.target.value)}>{CATEGORIES.map(o=><option key={o} value={o}>{o}</option>)}</select><div className="formGrid two"><input className="input" placeholder="🔗 Link (opcional)" value={link} onChange={e=>setLink(e.target.value)}/><input className="input" type="text" inputMode="decimal" placeholder="💲 Precio (ARS)" value={price} onChange={e=>setPrice(e.target.value)}/></div><div className="formGrid two"><select className="input" value={priority} onChange={e=>setPriority(e.target.value)}><option value="alta">🔴 Prioridad Alta</option><option value="media">🟡 Prioridad Media</option><option value="baja">🟢 Prioridad Baja</option></select><label className="installmentToggle"><span>💳 En cuotas</span><input type="checkbox" checked={installmentsEnabled} onChange={e=>{ const enabled=e.target.checked; setInstallmentsEnabled(enabled); if(enabled&&!installmentsTotal) setInstallmentsTotal(price||'') }}/></label></div>{installmentsEnabled && <section className="installmentConfig"><strong>💳 Configuración de cuotas</strong><div className="formGrid three"><label><span>Cantidad de cuotas</span><input className="input" type="number" min="1" value={installmentsCount} onChange={e=>setInstallmentsCount(e.target.value)}/></label><label><span>Cuotas pagadas</span><input className="input" type="number" min="0" value={installmentsPaid} onChange={e=>setInstallmentsPaid(e.target.value)}/></label><label><span>Total financiado</span><input className="input" type="text" inputMode="decimal" placeholder="Ej: 150000" value={installmentsTotal} onChange={e=>setInstallmentsTotal(e.target.value)}/></label></div></section>}<textarea className="input textarea" placeholder="📝 Notas (opcional)" value={notes} onChange={e=>setNotes(e.target.value)}/><button className="primaryButton full" onClick={handleSubmit}>{editingId?'💾 Guardar cambios':'➕ Agregar a la lista'}</button></section>}
+            <section className="itemsArea">{filteredItems.length===0 && <div className="emptyState"><div>📦</div><strong>No hay artículos en esta vista.</strong><span>Probá agregando uno con el botón de arriba.</span></div>}{Object.entries(groupedItems).map(([groupName,groupItems])=><section className="categoryGroup" key={groupName}><h3>{groupName}</h3><div className="itemGrid">{groupItems.map(item=>{ const inst=getInstallments(item); const pay=inst?.count?Math.round(inst.totalCents/inst.count):0; return <article className={item.done?'itemCard done':'itemCard'} key={item.id}><div className="itemMain"><input type="checkbox" checked={!!item.done} onChange={()=>toggleDone(item)}/><div className="itemText"><div className="itemTitleRow"><strong>{item.name}</strong><i style={{background:PRIORITY_COLORS[item.priority]||PRIORITY_COLORS.media}} /></div>{(item.priceCents!=null||item.price!=null) && <b className="itemPrice">{formatARS(getPriceCents(item))}</b>}{inst && <div className="installmentBadge"><span>💳 {inst.count} cuotas</span><span>{formatARS(pay)} c/u</span><small>Pagadas: {inst.paid}/{inst.count}</small></div>}{item.notes && <p className="itemNotes">{item.notes}</p>}{item.link && <a className="itemLink" href={item.link} target="_blank" rel="noopener noreferrer">🔗 Ver artículo</a>}</div></div><div className="itemActions"><button onClick={()=>startEdit(item)}>✏️</button><button onClick={()=>deleteItem(item.id)}>🗑️</button></div></article>})}</div></section>)}</section>
+          </>}
 
-        {/* Shared: has list */}
-        {activeTab === "shared" && sharedListId && (
-          <div style={{ marginTop: 12 }}>
-            {sharedMembers.length > 0 && (
-              <div style={{ display: "flex", justifyContent: "center", gap: 4, marginBottom: 8 }}>
-                {sharedMembers.map(m => (
-                  <img key={m.id} src={m.photo} alt={m.name} title={m.name} style={{ width: 30, height: 30, borderRadius: "50%", border: "2px solid #e040a0" }} />
-                ))}
-                <span style={{ fontSize: 12, color: "#cbb6ff", alignSelf: "center", marginLeft: 6 }}>{sharedMembers.length} personas</span>
-              </div>
-            )}
-            <div style={{ display: "flex", justifyContent: "center", gap: 8 }}>
-              <button onClick={() => setShowSharePanel(!showSharePanel)} style={btnOutline}>
-                🔗 Compartir código
-              </button>
-              <button onClick={handleLeaveShared} style={{ ...btnOutline, color: "#ef5350", borderColor: "#ef5350" }}>
-                Salir de lista
-              </button>
-            </div>
-            {showSharePanel && (
-              <div style={{ marginTop: 12, padding: 12, background: "#1a0a2e", borderRadius: 10 }}>
-                <p style={{ fontSize: 12, color: "#cbb6ff", margin: "0 0 8px" }}>Compartí este código:</p>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                  <code style={{ background: "#2d1b4e", padding: "8px 16px", borderRadius: 8, fontSize: 13, color: "#b388ff", letterSpacing: 1 }}>
-                    {sharedListId}
-                  </code>
-                  <button onClick={copyCode} style={{ ...btnOutline, padding: "6px 12px", fontSize: 12 }}>
-                    {copied ? "Copiado ✅" : "Copiar"}
-                  </button>
-                </div>
-                <p style={{ fontSize: 11, color: "#7c6a8a", marginTop: 8 }}>La otra persona debe iniciar sesión y usar "Unirme con código"</p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Stats */}
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16, width: "100%", maxWidth: 360, marginLeft: "auto", marginRight: "auto" }}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 24, fontWeight: 800 }}>{total}</div>
-            <div style={{ fontSize: 11, color: "#cbb6ff", textTransform: "uppercase" }}>Total</div>
-          </div>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 24, fontWeight: 800, color: "#66bb6a" }}>{done}</div>
-            <div style={{ fontSize: 11, color: "#cbb6ff", textTransform: "uppercase" }}>Listo ✓</div>
-          </div>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 24, fontWeight: 800, color: "#ff8a65" }}>{pending}</div>
-            <div style={{ fontSize: 11, color: "#cbb6ff", textTransform: "uppercase" }}>Pendiente</div>
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ flex: 1, background: "#1a0a2e", borderRadius: 10, overflow: "hidden", height: 24 }}>
-            <div style={{
-              width: `${percent}%`,
-              background: "linear-gradient(90deg, #e040a0, #b388ff)",
-              height: "100%",
-              transition: "width 0.5s ease",
-              borderRadius: 10
-            }} />
-          </div>
-          <span style={{ fontSize: 14, fontWeight: 700, color: "#cbb6ff", minWidth: 50, textAlign: "right" }}>
-            {percent}%
-          </span>
-        </div>
-      </div>
-
-      {/* FILTERS */}
-      <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 16 }}>
-        <button onClick={() => setFilter("all")} style={filterBtn("all")}>🏠 Todos</button>
-        <button onClick={() => setFilter("pending")} style={filterBtn("pending")}>⏳ Pendientes</button>
-        <button onClick={() => setFilter("done")} style={filterBtn("done")}>✅ Listos</button>
-      </div>
-
-      {/* ADD BUTTON */}
-      {currentListId && (
-        <button
-          onClick={() => {
-            if (showForm && editingId) resetForm()
-            setShowForm(!showForm)
-          }}
-          style={{ ...btnGradient, marginTop: 16, width: "100%" }}
-        >
-          {showForm ? "✕ Cerrar" : "＋ Agregar artículo"}
-        </button>
-      )}
-
-      {/* FORM */}
-      {showForm && currentListId && (
-        <div style={{
-          marginTop: 12,
-          padding: 20,
-          background: "#2d1b4e",
-          borderRadius: 14,
-          border: "1px solid rgba(224, 64, 160, 0.3)"
-        }}>
-          <input
-            placeholder="Nombre del artículo *"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            style={inputStyle}
-            autoFocus
-          />
-          <select value={category} onChange={e => setCategory(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
-            {CATEGORIES.map(c => (
-              <option key={c} value={c}>{c}</option>
-            ))}
-          </select>
-          <input
-            placeholder="🔗 Link donde lo viste (opcional)"
-            value={link}
-            onChange={e => setLink(e.target.value)}
-            style={inputStyle}
-          />
-          <input
-            type="number"
-            placeholder="💲 Precio estimado (opcional)"
-            value={price}
-            onChange={e => setPrice(e.target.value)}
-            min="0"
-            step="0.01"
-            style={inputStyle}
-          />
-          <select value={priority} onChange={e => setPriority(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
-            <option value="alta">🔴 Prioridad Alta</option>
-            <option value="media">🟡 Prioridad Media</option>
-            <option value="baja">🟢 Prioridad Baja</option>
-          </select>
-          <button onClick={handleSubmit} style={{ ...btnGradient, width: "100%", marginTop: 4 }}>
-            {editingId ? "💾 Guardar cambios" : "➕ Agregar a la lista"}
-          </button>
-        </div>
-      )}
-
-      {/* ITEMS LIST */}
-      <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 20, paddingBottom: 40 }}>
-        {filteredItems.length === 0 && (
-          <div style={{ textAlign: "center", padding: "48px 24px", color: "#cbb6ff" }}>
-            <div style={{ fontSize: 48 }}>📦</div>
-            <p>No hay artículos en esta vista.</p>
-            <p style={{ fontSize: 13, opacity: 0.7 }}>¡Agregá uno con el botón de arriba!</p>
-          </div>
-        )}
-
-        {Object.entries(grouped).map(([cat, catItems]) => (
-          <div key={cat}>
-            <h3 style={{
-              fontSize: 14,
-              color: "#b388ff",
-              borderBottom: "1px solid #3b2667",
-              paddingBottom: 6,
-              marginBottom: 8
-            }}>
-              {cat}
-            </h3>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {catItems.map(i => (
-                <div
-                  key={i.id}
-                  style={{
-                    background: i.done ? "#1e1238" : "#2d1b4e",
-                    opacity: i.done ? 0.65 : 1,
-                    padding: "14px 16px",
-                    borderRadius: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    border: "1px solid transparent",
-                    transition: "all 0.2s"
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
-                    <input
-                      type="checkbox"
-                      checked={i.done}
-                      onChange={() => toggleDone(i)}
-                      style={{ width: 18, height: 18, cursor: "pointer", accentColor: "#e040a0" }}
-                    />
-                    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{
-                          fontSize: 15,
-                          fontWeight: 700,
-                          textDecoration: i.done ? "line-through" : "none"
-                        }}>
-                          {i.name}
-                        </span>
-                        <span style={{
-                          width: 10,
-                          height: 10,
-                          borderRadius: "50%",
-                          background: priorityColors[i.priority] || priorityColors.media,
-                          display: "inline-block"
-                        }} />
-                      </div>
-                      {i.price && (
-                        <span style={{ fontSize: 13, color: "#ce93d8", fontWeight: 600 }}>
-                          ${i.price.toLocaleString("es-AR")}
-                        </span>
-                      )}
-                      {i.link && (
-                        <a href={i.link} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13, color: "#b388ff", textDecoration: "none" }}>
-                          🔗 Ver artículo
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => startEdit(i)} title="Editar" style={{ background: "transparent", border: "none", fontSize: 16, cursor: "pointer", padding: 4, borderRadius: 6 }}>
-                      ✏️
-                    </button>
-                    <button onClick={() => deleteItem(i.id)} title="Eliminar" style={{ background: "transparent", border: "none", fontSize: 16, cursor: "pointer", padding: 4, borderRadius: 6 }}>
-                      🗑️
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
+          {viewMode==='cuotas' && <section className="installmentsView"><header><h2>💳 Seguimiento de cuotas</h2><p>Aparecen solo los artículos con “En cuotas” activado.</p></header>{installmentItems.length===0 ? <div className="emptyState"><div>💳</div><strong>Todavía no tenés compras en cuotas.</strong><span>Editá un artículo y activá “En cuotas”.</span></div> : <div className="installmentGrid">{installmentItems.map(item=>{ const inst=getInstallments(item); const pay=inst.count?Math.round(inst.totalCents/inst.count):0; const paid=pay*inst.paid; const remaining=inst.totalCents-paid; const pct=inst.count?Math.round((inst.paid/inst.count)*100):0; return <article className="installmentCard" key={item.id}><div className="installmentHeader"><div><strong>{item.name}</strong><span>{item.category||'📦 Otros'}</span></div><button onClick={()=>startEdit(item)}>✏️ Editar</button></div><div className="installmentData"><span>Total financiado <b>{formatARS(inst.totalCents)}</b></span><span>Cuota estimada <b>{formatARS(pay)}</b></span><span>Pagadas <b>{inst.paid}/{inst.count}</b></span></div><div className="progressLine"><div style={{width:`${pct}%`}} /></div><div className="installmentMoneySplit"><span>Pagado <b>{formatARS(paid)}</b></span><span>Pendiente <b>{formatARS(remaining)}</b></span></div><div className="buttonRow"><button className="outlineButton" onClick={()=>updateInstallmentPaidCount(item,1)}>✅ +1 pagada</button><button className="outlineButton" onClick={()=>updateInstallmentPaidCount(item,-1)}>↩︎ -1</button></div></article>})}</div>}</section>}
+        </section>
+      </main>
     </div>
   )
 }
